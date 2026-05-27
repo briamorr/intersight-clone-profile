@@ -1,0 +1,235 @@
+---
+# =============================================================================
+# Playbook: clone_server_profile.yml
+#
+# Prompts for a source server profile name and a target profile name, then
+# clones the source profile in Cisco Intersight using bulk/MoCloners.
+# If a target serial number is provided, the cloned profile is then deployed.
+#
+# Authentication - set the following environment variables before running:
+#   export INTERSIGHT_API_KEY_ID="<your-key-id>"
+#   export INTERSIGHT_API_PRIVATE_KEY="<path-to-your-pem-key-file>"
+#
+# Usage:
+#   ansible-playbook -i inventory clone_server_profile.yml
+# =============================================================================
+
+- name: Clone a Cisco Intersight server profile by name
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    api_key_id: "{{ lookup('env', 'INTERSIGHT_API_KEY_ID') }}"
+    api_private_key: "{{ lookup('env', 'INTERSIGHT_API_PRIVATE_KEY') }}"
+    api_uri: "https://intersight.com/api/v1"
+    validate_certs: true
+
+  vars_prompt:
+    - name: source_profile_name
+      prompt: "Enter the source server profile name (exact match)"
+      private: false
+    - name: target_profile_name
+      prompt: "Enter the new cloned server profile name"
+      private: false
+    - name: target_server_serial
+      prompt: "Optional: Enter target blade serial number (leave blank for assign later)"
+      private: false
+      default: ""
+
+  tasks:
+
+    # -------------------------------------------------------------------------
+    # 1. Resolve source server profile by name
+    # -------------------------------------------------------------------------
+    - name: Look up source server profile by name
+      cisco.intersight.intersight_rest_api:
+        api_key_id: "{{ api_key_id }}"
+        api_private_key: "{{ api_private_key }}"
+        api_uri: "{{ api_uri }}"
+        validate_certs: "{{ validate_certs }}"
+        resource_path: /server/Profiles
+        query_params:
+          $filter: "Name eq '{{ source_profile_name }}'"
+        return_list: true
+      register: source_profile_lookup
+
+    - name: Fail if source server profile is not found
+      ansible.builtin.fail:
+        msg: >-
+          Source server profile '{{ source_profile_name }}' was not found in
+          Intersight. Verify the name and try again.
+      when: (source_profile_lookup.api_response | default([])) | length == 0
+
+    - name: Warn if multiple source profiles matched the name
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: {{ source_profile_lookup.api_response | length }} server
+          profiles matched '{{ source_profile_name }}'. Using the first result
+          (Moid: {{ source_profile_lookup.api_response[0].Moid }}).
+      when: source_profile_lookup.api_response | length > 1
+
+    - name: Store source profile object
+      ansible.builtin.set_fact:
+        source_profile: "{{ source_profile_lookup.api_response[0] }}"
+
+    - name: Display resolved source profile
+      ansible.builtin.debug:
+        msg: >-
+          Resolved source profile '{{ source_profile_name }}' ->
+          Moid: {{ source_profile.Moid }}
+
+    # -------------------------------------------------------------------------
+    # 2. Validate target profile name does not already exist
+    # -------------------------------------------------------------------------
+    - name: Look up target server profile by name
+      cisco.intersight.intersight_rest_api:
+        api_key_id: "{{ api_key_id }}"
+        api_private_key: "{{ api_private_key }}"
+        api_uri: "{{ api_uri }}"
+        validate_certs: "{{ validate_certs }}"
+        resource_path: /server/Profiles
+        query_params:
+          $filter: "Name eq '{{ target_profile_name }}'"
+        return_list: true
+      register: target_profile_lookup
+
+    - name: Fail if target profile name already exists
+      ansible.builtin.fail:
+        msg: >-
+          A server profile named '{{ target_profile_name }}' already exists.
+          Choose a different target name and re-run.
+      when: (target_profile_lookup.api_response | default([])) | length > 0
+
+    # -------------------------------------------------------------------------
+    # 3. Clone source profile using bulk/MoCloners
+    # -------------------------------------------------------------------------
+    - name: Derive assignment settings from optional serial input
+      ansible.builtin.set_fact:
+        requested_serial: "{{ target_server_serial | trim }}"
+        server_assignment_mode: "{{ 'Static' if (target_server_serial | trim | length > 0) else 'None' }}"
+
+    - name: Display assignment mode
+      ansible.builtin.debug:
+        msg: >-
+          Assignment mode: {{ 'Pre-assign by serial' if (requested_serial | length > 0) else 'Assign later' }}
+          {{ '(Serial: ' ~ requested_serial ~ ')' if (requested_serial | length > 0) else '' }}
+
+    - name: Build clone payload
+      ansible.builtin.set_fact:
+        clone_payload:
+          Sources:
+            - Moid: "{{ source_profile.Moid }}"
+              ObjectType: server.Profile
+          Targets:
+            - Name: "{{ target_profile_name }}"
+              Description: "{{ source_profile.Description | default('') }}"
+              Organization:
+                ObjectType: organization.Organization
+                Moid: "{{ source_profile.Organization.Moid }}"
+              TargetPlatform: "{{ source_profile.TargetPlatform | default('FIAttached') }}"
+              Tags: "{{ source_profile.Tags | default([]) }}"
+              AssignedServer: null
+              ServerPool: null
+              ServerPreAssignBySlot: null
+              ServerPreAssignBySerial: "{{ requested_serial }}"
+              ServerAssignmentMode: "{{ server_assignment_mode }}"
+              InitialAutoDeployMode: false
+              InitialAutoDeployConfigComplete: false
+
+    - name: Clone server profile
+      cisco.intersight.intersight_rest_api:
+        api_key_id: "{{ api_key_id }}"
+        api_private_key: "{{ api_private_key }}"
+        api_uri: "{{ api_uri }}"
+        validate_certs: "{{ validate_certs }}"
+        resource_path: /bulk/MoCloners
+        update_method: post
+        api_body: "{{ clone_payload }}"
+        state: present
+      register: clone_result
+
+    - name: Display clone request result
+      ansible.builtin.debug:
+        msg: >-
+          Clone requested. Source='{{ source_profile_name }}'
+          Target='{{ target_profile_name }}'
+          ResponseMoid={{ clone_result.api_response.Moid | default('UNKNOWN') }}
+
+    - name: Completion message
+      ansible.builtin.debug:
+        msg: >-
+          Finished cloning server profile '{{ source_profile_name }}' to
+          '{{ target_profile_name }}'.
+
+    # -------------------------------------------------------------------------
+    # 4. Optional deploy when serial pre-assignment is requested
+    # -------------------------------------------------------------------------
+    - name: Look up cloned profile by target name for deploy
+      cisco.intersight.intersight_rest_api:
+        api_key_id: "{{ api_key_id }}"
+        api_private_key: "{{ api_private_key }}"
+        api_uri: "{{ api_uri }}"
+        validate_certs: "{{ validate_certs }}"
+        resource_path: /server/Profiles
+        query_params:
+          $filter: "Name eq '{{ target_profile_name }}'"
+        return_list: true
+      register: cloned_profile_lookup
+      when: requested_serial | length > 0
+
+    - name: Fail if cloned profile lookup for deploy returned no result
+      ansible.builtin.fail:
+        msg: >-
+          Cloned profile '{{ target_profile_name }}' was not found after clone,
+          so deploy cannot proceed.
+      when:
+        - requested_serial | length > 0
+        - (cloned_profile_lookup.api_response | default([])) | length == 0
+
+    - name: Warn if multiple cloned profiles matched target name for deploy
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: {{ cloned_profile_lookup.api_response | length }} profiles
+          matched '{{ target_profile_name }}' for deploy. Using first result
+          (Moid: {{ cloned_profile_lookup.api_response[0].Moid }}).
+      when:
+        - requested_serial | length > 0
+        - (cloned_profile_lookup.api_response | default([])) | length > 1
+
+    - name: Store cloned profile Moid for deploy
+      ansible.builtin.set_fact:
+        cloned_profile_moid: "{{ cloned_profile_lookup.api_response[0].Moid }}"
+      when: requested_serial | length > 0
+
+    - name: Deploy cloned profile changes
+      cisco.intersight.intersight_rest_api:
+        api_key_id: "{{ api_key_id }}"
+        api_private_key: "{{ api_private_key }}"
+        api_uri: "{{ api_uri }}"
+        validate_certs: "{{ validate_certs }}"
+        resource_path: "/server/Profiles/{{ cloned_profile_moid }}"
+        update_method: post
+        api_body:
+          ScheduledActions:
+            - Action: Deploy
+              ProceedOnReboot: false
+              ActionQualifier:
+                Scope: all
+        state: present
+      register: deploy_result
+      when: requested_serial | length > 0
+
+    - name: Display deploy result
+      ansible.builtin.debug:
+        msg: >-
+          Deploy requested for cloned profile '{{ target_profile_name }}'
+          (Moid: {{ cloned_profile_moid }}).
+      when: requested_serial | length > 0
+
+    - name: Display assign-later notice when deploy is skipped
+      ansible.builtin.debug:
+        msg: >-
+          No serial number provided. Clone remains in assign-later state and no
+          deploy action was requested.
+      when: requested_serial | length == 0

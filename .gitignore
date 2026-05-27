@@ -1,0 +1,23 @@
+# Ansible
+*.pyc
+__pycache__/
+*.egg-info/
+dist/
+build/
+.ansible/
+*.retry
+
+# Credentials
+APIKeyID.txt
+Secretkey.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
