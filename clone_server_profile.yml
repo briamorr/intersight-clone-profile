@@ -240,18 +240,13 @@
           deploy_profile_poll.api_response.RunningWorkflows | default([]) | length > 0
         ) or
         (
-          (
-            (deploy_profile_poll.api_response.get('ConfigContext', {}).get('ConfigState', '')) ~ ' ' ~
-            (deploy_profile_poll.api_response.get('ConfigContext', {}).get('OperState', '')) ~ ' ' ~
-            (deploy_profile_poll.api_response.get('DeployStatus', ''))
-          ) | regex_search('(?i)(ok|in.?sync|assigned|applied|completed|success)') is not none
+          deploy_profile_poll.api_response.get('ConfigContext', {}).get('ConfigState', '') in ['Assigned', 'Associated'] and
+          deploy_profile_poll.api_response.get('ConfigContext', {}).get('OperState', '') == 'Ok' and
+          deploy_profile_poll.api_response.get('DeployStatus', '') in ['Complete', 'Partial', 'None']
         )
       failed_when: >-
-        (
-          (deploy_profile_poll.api_response.get('ConfigContext', {}).get('ConfigState', '')) ~ ' ' ~
-          (deploy_profile_poll.api_response.get('ConfigContext', {}).get('OperState', '')) ~ ' ' ~
-          (deploy_profile_poll.api_response.get('DeployStatus', ''))
-        ) | regex_search('(?i)(fail|failed|error|aborted|terminated)') is not none
+        deploy_profile_poll.api_response.get('ConfigContext', {}).get('ConfigState', '') == 'Failed' or
+        deploy_profile_poll.api_response.get('ConfigContext', {}).get('OperState', '') == 'Failed'
       retries: 15
       delay: 60
       when: requested_serial | length > 0
@@ -302,11 +297,9 @@
         - requested_serial | length > 0
         - deploy_workflow_moid is not defined or deploy_workflow_moid | length == 0
         - not (
-            (
-              (deploy_profile_poll.api_response.get('ConfigContext', {}).get('ConfigState', '')) ~ ' ' ~
-              (deploy_profile_poll.api_response.get('ConfigContext', {}).get('OperState', '')) ~ ' ' ~
-              (deploy_profile_poll.api_response.get('DeployStatus', ''))
-            ) | regex_search('(?i)(ok|in.?sync|assigned|applied|completed|success)') is not none
+            deploy_profile_poll.api_response.get('ConfigContext', {}).get('ConfigState', '') in ['Assigned', 'Associated'] and
+            deploy_profile_poll.api_response.get('ConfigContext', {}).get('OperState', '') == 'Ok' and
+            deploy_profile_poll.api_response.get('DeployStatus', '') in ['Complete', 'Partial', 'None']
           )
 
     - name: Show final deploy status summary
