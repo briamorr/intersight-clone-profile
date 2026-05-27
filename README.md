@@ -11,7 +11,8 @@ This repository is focused on one workflow: cloning an existing Cisco Intersight
 5. Verifies the target profile name does not already exist
 6. Sends a clone request to `bulk/MoCloners`
 7. If serial is provided, requests profile Deploy via `ScheduledActions`
-8. Prints completion details for clone/deploy actions
+8. Polls profile RunningWorkflows, then monitors workflow status every 60 seconds until success or failure
+9. Prints completion details for clone/deploy actions
 
 ## Requirements
 
@@ -64,6 +65,7 @@ Assignment behavior:
 - If serial is blank: clone is created with Assign Later
 - If serial is provided: clone is pre-assigned by serial using Static assignment mode
 - If serial is provided: playbook also requests Deploy on the cloned profile
+- After deploy request, the playbook checks RunningWorkflows and polls the workflow status once per minute until deploy succeeds or fails
 
 ## Edge cases handled
 

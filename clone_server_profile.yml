@@ -227,6 +227,98 @@
           (Moid: {{ cloned_profile_moid }}).
       when: requested_serial | length > 0
 
+    - name: Wait for deploy workflow to appear on cloned profile
+      cisco.intersight.intersight_rest_api:
+        api_key_id: "{{ api_key_id }}"
+        api_private_key: "{{ api_private_key }}"
+        api_uri: "{{ api_uri }}"
+        validate_certs: "{{ validate_certs }}"
+        resource_path: "/server/Profiles/{{ cloned_profile_moid }}"
+      register: deploy_profile_poll
+      until: >-
+        (
+          deploy_profile_poll.api_response.RunningWorkflows | default([]) | length > 0
+        ) or
+        (
+          (
+            (deploy_profile_poll.api_response.get('ConfigContext', {}).get('ConfigState', '')) ~ ' ' ~
+            (deploy_profile_poll.api_response.get('ConfigContext', {}).get('OperState', '')) ~ ' ' ~
+            (deploy_profile_poll.api_response.get('DeployStatus', ''))
+          ) | regex_search('(?i)(ok|in.?sync|assigned|applied|completed|success)') is not none
+        )
+      failed_when: >-
+        (
+          (deploy_profile_poll.api_response.get('ConfigContext', {}).get('ConfigState', '')) ~ ' ' ~
+          (deploy_profile_poll.api_response.get('ConfigContext', {}).get('OperState', '')) ~ ' ' ~
+          (deploy_profile_poll.api_response.get('DeployStatus', ''))
+        ) | regex_search('(?i)(fail|failed|error|aborted|terminated)') is not none
+      retries: 15
+      delay: 60
+      when: requested_serial | length > 0
+
+    - name: Store workflow Moid if running workflow is present
+      ansible.builtin.set_fact:
+        deploy_workflow_moid: "{{ deploy_profile_poll.api_response.RunningWorkflows[0].Moid }}"
+      when:
+        - requested_serial | length > 0
+        - (deploy_profile_poll.api_response.RunningWorkflows | default([])) | length > 0
+
+    - name: Show workflow selected for monitoring
+      ansible.builtin.debug:
+        msg: >-
+          Monitoring deploy workflow Moid {{ deploy_workflow_moid }} for
+          profile '{{ target_profile_name }}'.
+      when:
+        - requested_serial | length > 0
+        - deploy_workflow_moid is defined
+        - deploy_workflow_moid | length > 0
+
+    - name: Poll workflow status every minute until success or failure
+      cisco.intersight.intersight_rest_api:
+        api_key_id: "{{ api_key_id }}"
+        api_private_key: "{{ api_private_key }}"
+        api_uri: "{{ api_uri }}"
+        validate_certs: "{{ validate_certs }}"
+        resource_path: "/workflow/WorkflowInfos/{{ deploy_workflow_moid }}"
+      register: deploy_workflow_poll
+      until: deploy_workflow_poll.api_response.get('WorkflowStatus', '') == 'Completed'
+      failed_when: deploy_workflow_poll.api_response.get('WorkflowStatus', '') in ['Failed', 'Terminated', 'Canceled']
+      retries: 120
+      delay: 60
+      when:
+        - requested_serial | length > 0
+        - deploy_workflow_moid is defined
+        - deploy_workflow_moid | length > 0
+
+    - name: Validate successful profile state when workflow link is absent
+      ansible.builtin.fail:
+        msg: >-
+          Deploy workflow link was not found and profile state does not look
+          successful. Last observed state:
+          ConfigState={{ deploy_profile_poll.api_response.get('ConfigContext', {}).get('ConfigState', 'UNKNOWN') }}
+          OperState={{ deploy_profile_poll.api_response.get('ConfigContext', {}).get('OperState', 'UNKNOWN') }}
+          DeployStatus={{ deploy_profile_poll.api_response.get('DeployStatus', 'UNKNOWN') }}
+      when:
+        - requested_serial | length > 0
+        - deploy_workflow_moid is not defined or deploy_workflow_moid | length == 0
+        - not (
+            (
+              (deploy_profile_poll.api_response.get('ConfigContext', {}).get('ConfigState', '')) ~ ' ' ~
+              (deploy_profile_poll.api_response.get('ConfigContext', {}).get('OperState', '')) ~ ' ' ~
+              (deploy_profile_poll.api_response.get('DeployStatus', ''))
+            ) | regex_search('(?i)(ok|in.?sync|assigned|applied|completed|success)') is not none
+          )
+
+    - name: Show final deploy status summary
+      ansible.builtin.debug:
+        msg: >-
+          Deploy workflow completed for '{{ target_profile_name }}'.
+          ConfigState={{ deploy_profile_poll.api_response.get('ConfigContext', {}).get('ConfigState', 'UNKNOWN') }}
+          OperState={{ deploy_profile_poll.api_response.get('ConfigContext', {}).get('OperState', 'UNKNOWN') }}
+          DeployStatus={{ deploy_profile_poll.api_response.get('DeployStatus', 'UNKNOWN') }}
+          WorkflowStatus={{ deploy_workflow_poll.api_response.get('Status', deploy_workflow_poll.api_response.get('WorkflowStatus', 'UNKNOWN')) if (deploy_workflow_poll is defined and deploy_workflow_poll.api_response is defined) else 'NOT_MONITORED' }}
+      when: requested_serial | length > 0
+
     - name: Display assign-later notice when deploy is skipped
       ansible.builtin.debug:
         msg: >-
